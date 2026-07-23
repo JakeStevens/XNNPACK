@@ -404,6 +404,10 @@ void TestStaticB(xnn_datatype convert_to = xnn_datatype_invalid,
       GTEST_SKIP();
       return;
     }
+    // CreateRuntime may also fail with unsupported_parameter for configs that
+    // have no available microkernel. Assert success so we never proceed to
+    // reshape a null runtime, which segfaults
+    ASSERT_EQ(xnn_status_success, status);
 
     // Run the subgraph twice, with a different input/output shape each time
     // (except for the input/output channels, which are determined by the filter
@@ -676,6 +680,10 @@ void TestDynamicB(xnn_datatype convert_to = xnn_datatype_invalid,
       GTEST_SKIP();
       return;
     }
+    // CreateRuntime may also fail with unsupported_parameter for configs that
+    // have no available microkernel. Assert success so we never proceed to
+    // reshape a null runtime, which segfaults
+    ASSERT_EQ(xnn_status_success, status);
 
     // Run the subgraph twice, with a different input/output shape each time.
     for (int reshape = 0; reshape < 2; ++reshape) {
