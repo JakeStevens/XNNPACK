@@ -601,6 +601,12 @@ TEST(FullyConnectedQD8F32QB4W_F16, static_b) {
   TestStaticB<float, qcint4, float, float, xnn_float16>(
       /*convert_to=*/xnn_datatype_qdint8, /*block_size=*/32);
 }
+// bf16 output only supports bf16-typed blockwise scales (there is no
+// qd8_bf16_qb4w_f16_scales create variant), so no _F16 counterpart here.
+TEST(FullyConnectedQD8BF16QB4W_BF16, static_b) {
+  TestStaticB<float, qcint4, float, xnn_bfloat16, xnn_bfloat16>(
+      /*convert_to=*/xnn_datatype_qdint8, /*block_size=*/32);
+}
 #endif  // XNNPACK_USE_YNNPACK
 
 template <typename Input, typename Filter, typename Bias,
