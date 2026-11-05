@@ -29,6 +29,54 @@
 #include "src/xnnpack/requantization.h"
 #include "test/replicable_random_device.h"
 
+void VBinaryMicrokernelTester::Test(xnn_bf16_vbinary_ukernel_fn vbinary,
+                                    OpType op_type,
+                                    xnn_init_bf16_default_params_fn) const {
+  xnnpack::ReplicableRandomDevice rng;
+  xnnpack::DatatypeGenerator<xnn_bfloat16> bf16dist;
+
+  const int stride_b = broadcast_b() ? 0 : 1;
+  xnnpack::Buffer<xnn_bfloat16> a(batch_size(), xnnpack::XnnExtraBytes);
+  xnnpack::Buffer<xnn_bfloat16> b(broadcast_b() ? 1 : batch_size(),
+                                  xnnpack::XnnExtraBytes);
+  xnnpack::Buffer<xnn_bfloat16> y(
+      batch_size(),
+      xnnpack::PaddingBytes{inplace_a() || inplace_b() ? XNN_EXTRA_BYTES : 0});
+  xnnpack::Buffer<xnn_bfloat16> y_ref(batch_size());
+  for (size_t iteration = 0; iteration < iterations(); iteration++) {
+    if (!inplace_a()) {
+      std::generate(a.begin(), a.end(), [&]() { return bf16dist(rng); });
+    }
+    if (!inplace_b()) {
+      std::generate(b.begin(), b.end(), [&]() { return bf16dist(rng); });
+    }
+    if (inplace_a() || inplace_b()) {
+      std::generate(y.begin(), y.end(), [&]() { return bf16dist(rng); });
+    }
+    const xnn_bfloat16* a_data = inplace_a() ? y.data() : a.data();
+    const xnn_bfloat16* b_data = inplace_b() ? y.data() : b.data();
+    reference_op_impl(a_data, b_data, y_ref.data(), batch_size(), op_type);
+
+    // Call optimized micro-kernel.
+    vbinary(batch_size() * sizeof(xnn_bfloat16), a_data, b_data, y.data(),
+            nullptr);
+
+    // Verify results.
+    for (size_t i = 0; i < batch_size(); i++) {
+      if (std::isnan(static_cast<float>(y_ref[i]))) {
+        // TODO: We could check if y[i] is NaN, but not all our kernels do this.
+      } else {
+        ASSERT_NEAR(
+            y[i], y_ref[i],
+            std::max(1.0e-4f, std::abs(static_cast<float>(y_ref[i])) * 1.0e-2f))
+            << "at " << i << " / " << batch_size()
+            << ", a=" << static_cast<float>(a[i])
+            << ", b=" << static_cast<float>(b[stride_b * i]);
+      }
+    }
+  }
+}
+
 void VBinaryMicrokernelTester::Test(xnn_f16_vbinary_ukernel_fn vbinary,
                                     OpType op_type,
                                     xnn_init_f16_default_params_fn) const {
