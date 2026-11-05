@@ -722,6 +722,50 @@ TEST(BINARY_ELEMENTWISE_ND, bf16_hardware_conversion_rounding) {
 }
 #endif
 
+#if XNN_ENABLE_ARM_BF16 && XNN_ARCH_ARM64
+TEST(BINARY_ELEMENTWISE_ND, bf16_divide_hardware_conversion_rounding) {
+  const xnn_hardware_config* hardware_config = xnn_init_hardware_config();
+  if (hardware_config == nullptr ||
+      !(hardware_config->arch_flags & xnn_arch_arm_neon_bf16)) {
+    GTEST_SKIP();
+  }
+  const std::array<uint16_t, 12> a_bits = {0x0001, 0x007F, 0x0080, 0x0081,
+                                           0x0083, 0x8081, 0x3F81, 0x3F83,
+                                           0x7F7F, 0x8000, 0x0000, 0x7F80};
+  struct Kernel {
+    xnn_bf16_vbinary_ukernel_fn ukernel;
+    bool broadcast;
+    bool reversed;
+  };
+  for (const Kernel kernel :
+       {Kernel{xnn_bf16_vdiv_ukernel__neonbf16_u16, false, false},
+        Kernel{xnn_bf16_vdivc_ukernel__neonbf16_u16, true, false},
+        Kernel{xnn_bf16_vrdivc_ukernel__neonbf16_u16, true, true}}) {
+    for (size_t batch : {1, 7, 8, 9, 15, 16, 17, 33}) {
+      for (uint16_t divisor : {0x4000, 0x3F01, 0x3FC0, 0x3F80}) {
+        Buffer<xnn_bfloat16> a(batch, XnnExtraBytes);
+        Buffer<xnn_bfloat16> b(kernel.broadcast ? 1 : batch, XnnExtraBytes);
+        Buffer<xnn_bfloat16> output(batch);
+        for (size_t i = 0; i < batch; ++i) {
+          a[i] = xnn_bfloat16_from_bits(a_bits[i % a_bits.size()]);
+        }
+        std::fill(b.begin(), b.end(), xnn_bfloat16_from_bits(divisor));
+        kernel.ukernel(batch * sizeof(xnn_bfloat16), a.data(), b.data(),
+                       output.data(), nullptr);
+        const float b_value = float(b[0]);
+        for (size_t i = 0; i < batch; ++i) {
+          const float expected =
+              kernel.reversed ? b_value / float(a[i]) : float(a[i]) / b_value;
+          EXPECT_EQ(xnn_bfloat16_to_bits(xnn_bfloat16_from_float(expected)),
+                    xnn_bfloat16_to_bits(output[i]))
+              << "batch=" << batch << ", i=" << i << ", divisor=" << divisor;
+        }
+      }
+    }
+  }
+}
+#endif
+
 TEST(BINARY_ELEMENTWISE_ND, overflow_stride) {
   ASSERT_EQ(xnn_status_success, xnn_initialize(/*allocator=*/nullptr));
   xnn_operator_t op = nullptr;
