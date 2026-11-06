@@ -26,11 +26,17 @@
 #include "src/xnnpack/buffer.h"
 #include "src/xnnpack/common.h"
 #include "src/xnnpack/datatype.h"
+#include "src/xnnpack/hardware-config.h"
 #include "src/xnnpack/math.h"
 #include "src/xnnpack/operator-utils.h"
 #include "src/xnnpack/reference-utils.h"
+#include "src/xnnpack/vbinary.h"
 #include "test/operators/operator-test-utils.h"
 #include "test/replicable_random_device.h"
+
+#if XNN_ARCH_X86 || XNN_ARCH_X86_64
+#include <xmmintrin.h>
+#endif
 
 using ::testing::Combine;
 using ::testing::Values;
@@ -667,6 +673,98 @@ INSTANTIATE_TEST_SUITE_P(QuantizedTest, QuantizedTest,
                                     RunMode::kEager),
                              ValuesIn(all_binary_ops))),
                          [](const auto& info) { return info.param.Name(); });
+
+#if XNN_ENABLE_AVX512BF16 && (XNN_ARCH_X86 || XNN_ARCH_X86_64)
+TEST(BINARY_ELEMENTWISE_ND, bf16_hardware_conversion_rounding) {
+  const xnn_hardware_config* hardware_config = xnn_init_hardware_config();
+  if (hardware_config == nullptr ||
+      !(hardware_config->arch_flags & xnn_arch_x86_avx512bf16)) {
+    GTEST_SKIP();
+  }
+  struct ScopedMxcsr {
+    unsigned int saved = _mm_getcsr();
+    ScopedMxcsr() { _mm_setcsr(saved & ~0x8040u); }
+    ~ScopedMxcsr() { _mm_setcsr(saved); }
+  } mxcsr;
+  const std::array<uint16_t, 14> a_bits = {
+      0x0080, 0x8080, 0x0080, 0x8080, 0x3F81, 0x3F83, 0x0000,
+      0x8000, 0x7F80, 0xFF80, 0x7F81, 0xFFC1, 0x0080, 0x8080};
+  const std::array<uint16_t, 14> b_bits = {
+      0x3F00, 0x3F00, 0x3F01, 0x3F01, 0x3FC0, 0x3FC0, 0x3F80,
+      0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F80, 0x3F7F, 0x3F7F};
+  for (size_t batch : {1, 15, 16, 17, 31, 32, 33, 65}) {
+    Buffer<xnn_bfloat16> a(batch, XnnExtraBytes);
+    Buffer<xnn_bfloat16> b(batch, XnnExtraBytes);
+    Buffer<xnn_bfloat16> output(batch);
+    for (size_t i = 0; i < batch; ++i) {
+      a[i] = xnn_bfloat16_from_bits(a_bits[i % a_bits.size()]);
+      b[i] = xnn_bfloat16_from_bits(b_bits[i % b_bits.size()]);
+    }
+    xnn_bf16_vmul_ukernel__avx512bf16_u32(batch * sizeof(xnn_bfloat16),
+                                          a.data(), b.data(), output.data(),
+                                          nullptr);
+    for (size_t i = 0; i < batch; ++i) {
+      const float expected = float(a[i]) * float(b[i]);
+      if (std::isnan(expected)) {
+        EXPECT_TRUE(std::isnan(float(output[i]))) << i;
+      } else {
+        EXPECT_EQ(xnn_bfloat16_to_bits(xnn_bfloat16_from_float(expected)),
+                  xnn_bfloat16_to_bits(output[i]))
+            << i;
+      }
+    }
+    EXPECT_EQ(0x0040, xnn_bfloat16_to_bits(output[0]));
+    if (batch > 13) {
+      EXPECT_EQ(0x0080, xnn_bfloat16_to_bits(output[12]));
+      EXPECT_EQ(0x8080, xnn_bfloat16_to_bits(output[13]));
+    }
+  }
+}
+#endif
+
+#if XNN_ENABLE_ARM_BF16 && XNN_ARCH_ARM64
+TEST(BINARY_ELEMENTWISE_ND, bf16_divide_hardware_conversion_rounding) {
+  const xnn_hardware_config* hardware_config = xnn_init_hardware_config();
+  if (hardware_config == nullptr ||
+      !(hardware_config->arch_flags & xnn_arch_arm_neon_bf16)) {
+    GTEST_SKIP();
+  }
+  const std::array<uint16_t, 12> a_bits = {0x0001, 0x007F, 0x0080, 0x0081,
+                                           0x0083, 0x8081, 0x3F81, 0x3F83,
+                                           0x7F7F, 0x8000, 0x0000, 0x7F80};
+  struct Kernel {
+    xnn_bf16_vbinary_ukernel_fn ukernel;
+    bool broadcast;
+    bool reversed;
+  };
+  for (const Kernel kernel :
+       {Kernel{xnn_bf16_vdiv_ukernel__neonbf16_u16, false, false},
+        Kernel{xnn_bf16_vdivc_ukernel__neonbf16_u16, true, false},
+        Kernel{xnn_bf16_vrdivc_ukernel__neonbf16_u16, true, true}}) {
+    for (size_t batch : {1, 7, 8, 9, 15, 16, 17, 33}) {
+      for (uint16_t divisor : {0x4000, 0x3F01, 0x3FC0, 0x3F80}) {
+        Buffer<xnn_bfloat16> a(batch, XnnExtraBytes);
+        Buffer<xnn_bfloat16> b(kernel.broadcast ? 1 : batch, XnnExtraBytes);
+        Buffer<xnn_bfloat16> output(batch);
+        for (size_t i = 0; i < batch; ++i) {
+          a[i] = xnn_bfloat16_from_bits(a_bits[i % a_bits.size()]);
+        }
+        std::fill(b.begin(), b.end(), xnn_bfloat16_from_bits(divisor));
+        kernel.ukernel(batch * sizeof(xnn_bfloat16), a.data(), b.data(),
+                       output.data(), nullptr);
+        const float b_value = float(b[0]);
+        for (size_t i = 0; i < batch; ++i) {
+          const float expected =
+              kernel.reversed ? b_value / float(a[i]) : float(a[i]) / b_value;
+          EXPECT_EQ(xnn_bfloat16_to_bits(xnn_bfloat16_from_float(expected)),
+                    xnn_bfloat16_to_bits(output[i]))
+              << "batch=" << batch << ", i=" << i << ", divisor=" << divisor;
+        }
+      }
+    }
+  }
+}
+#endif
 
 TEST(BINARY_ELEMENTWISE_ND, overflow_stride) {
   ASSERT_EQ(xnn_status_success, xnn_initialize(/*allocator=*/nullptr));

@@ -89,6 +89,7 @@ xnnpack_unit_test(
         ":operator_test_utils",
         "//:operator_utils",
         "//:reference_ukernels",
+        "//src/configs:hardware_config",
     ],
 )
 
